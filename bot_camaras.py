@@ -83,6 +83,13 @@ CAMERAS = [
     },
 ]
 
+# --- NUEVA CONSTANTE PARA AEROPUERTOS ---
+AEROPUERTOS = {
+    "MROC": "Juan Santamaría",
+    "MRPV": "Tobías Bolaños (Pavas)",
+    "MRLB": "Daniel Oduber (Liberia)",
+}
+
 
 def enviar_foto_telegram(imagen_bytes, caption=""):
     """
@@ -93,71 +100,117 @@ def enviar_foto_telegram(imagen_bytes, caption=""):
     files = {"photo": ("image.jpg", imagen_bytes, "image/jpeg")}
     data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
     try:
-        response = requests.post(url, files=files, data=data)
-        response.raise_for_status()  # Lanza un error si la petición falló
+        response = requests.post(url, files=files, data=data, timeout=20)
+        response.raise_for_status()
         if response.json().get("ok"):
             print(f"¡Foto '{caption}' enviada con éxito!")
         else:
             print(f"Error en respuesta de Telegram para '{caption}': {response.text}")
     except requests.exceptions.RequestException as e:
-        print(f"Error de red al enviar a Telegram: {e}")
+        print(f"Error de red al enviar foto a Telegram: {e}")
+
+
+# --- NUEVA FUNCIÓN PARA ENVIAR MENSAJES DE TEXTO ---
+def enviar_mensaje_telegram(texto):
+    """
+    Envía un mensaje de texto a un chat de Telegram, usando formato HTML.
+    """
+    print("Enviando mensaje METAR a Telegram...")
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": texto, "parse_mode": "HTML"}
+    try:
+        response = requests.post(url, data=data, timeout=20)
+        response.raise_for_status()
+        if response.json().get("ok"):
+            print("¡Mensaje METAR enviado con éxito!")
+        else:
+            print(f"Error en respuesta de Telegram para mensaje: {response.text}")
+    except requests.exceptions.RequestException as e:
+        print(f"Error de red al enviar mensaje a Telegram: {e}")
 
 
 def procesar_y_enviar_camaras():
     """
     Recorre la lista de cámaras, obtiene la imagen y la envía.
     """
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print(
-            "Error: Variables de entorno TELEGRAM_TOKEN y TELEGRAM_CHAT_ID no configuradas."
-        )
-        return
-
     for camera in CAMERAS:
         try:
             print(f"Procesando cámara: {camera['name']}")
-
-            # 1. Obtener el HTML de la página
             page_response = requests.get(camera["page_url"], timeout=15)
             page_response.raise_for_status()
             soup = BeautifulSoup(page_response.content, "lxml")
-
-            # 2. Encontrar la etiqueta de la imagen por su ID
             img_tag = soup.find("img", id=camera["image_id"])
             if not img_tag:
                 print(
-                    f"No se encontró la etiqueta de imagen con ID '{camera['image_id']}' en {camera['page_url']}. Omitiendo."
+                    f"No se encontró la etiqueta de imagen con ID '{camera['image_id']}' en {camera['page_url']}."
                 )
                 continue
-
-            # 3. Obtener la URL (src) de la imagen
             img_src = img_tag.get("src")
-            # Construir la URL completa si es relativa
             full_img_url = urljoin(camera.get("base_url", camera["page_url"]), img_src)
-
-            # 4. Descargar la imagen
             img_response = requests.get(full_img_url, timeout=15)
             img_response.raise_for_status()
-            imagen_bytes = img_response.content
-
-            # 5. Enviar a Telegram
-            enviar_foto_telegram(imagen_bytes, caption=camera["name"])
-
-            # Pequeña pausa para no saturar la API de Telegram
+            enviar_foto_telegram(img_response.content, caption=camera["name"])
             time.sleep(2)
-
         except Exception as e:
-            # Si algo falla, lo imprime en los logs de Railway y continúa
             print(f"Error procesando '{camera['name']}': {e}. Omitiendo.")
             continue
 
 
+# --- NUEVA FUNCIÓN PARA PROCESAR Y ENVIAR REPORTES METAR ---
+def procesar_y_enviar_metar():
+    """
+    Obtiene los reportes METAR y los devuelve como un solo texto formateado.
+    """
+    print("Procesando reportes METAR...")
+    icaos_string = ",".join(AEROPUERTOS.keys())
+    api_url = (
+        f"https://aviationweather.gov/api/data/metar?ids={icaos_string}&format=json"
+    )
+
+    try:
+        response = requests.get(api_url, timeout=15)
+        response.raise_for_status()
+        metar_data = response.json()
+
+        if not metar_data:
+            print("No se recibieron datos METAR de la API.")
+            return
+
+        # Formatear el mensaje para Telegram
+        mensaje_partes = ["<b>🛰️ Datos METAR Recibidos</b>\n"]
+        for reporte in metar_data:
+            icao = reporte.get("icaoId")
+            texto_crudo = reporte.get("rawOb")
+            nombre_aeropuerto = AEROPUERTOS.get(
+                icao, icao
+            )  # Usa el nombre si lo encuentra
+            mensaje_partes.append(
+                f"\n<b>📍 {nombre_aeropuerto} ({icao})</b>\n<code>{texto_crudo}</code>"
+            )
+
+        mensaje_final = "\n".join(mensaje_partes)
+        enviar_mensaje_telegram(mensaje_final)
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error al contactar la API de METAR: {e}")
+    except Exception as e:
+        print(f"Error inesperado al procesar METAR: {e}")
+
+
 if __name__ == "__main__":
-    print("Iniciando bot de cámaras...")
-    # Ciclo infinito para que se ejecute cada hora
-    while True:
-        procesar_y_enviar_camaras()
+    print("Iniciando bot de cámaras y METAR...")
+
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print(
-            "Ciclo completado. Esperando 1 hora (3600 segundos) para el próximo ciclo."
+            "Error: Variables de entorno TELEGRAM_TOKEN y TELEGRAM_CHAT_ID no configuradas."
         )
-        time.sleep(3600)
+    else:
+        # Ejecuta las tareas una tras otra
+        procesar_y_enviar_camaras()
+
+        # Pausa opcional para que los mensajes no lleguen todos al mismo segundo
+        time.sleep(5)
+
+        procesar_y_enviar_metar()
+
+    print("--- Script finalizado ---")
